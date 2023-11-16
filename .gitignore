@@ -1,0 +1,19 @@
+# Environment files and dirs.
+.venv/
+.vscode/
+
+# Application generated files and dirs.
+logs/
+data/
+test/
+
+# Build artifacts.
+build/
+
+# XNAT and DICOM related artifacts
+*.dcm
+
+# Python specific files and dirs.
+__pycache__/
+*.mypy_cache/
+*.egg-info

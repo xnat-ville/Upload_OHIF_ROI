@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools", "isort", "mypy", "pytest", "twine", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+authors = [ { name = "Keenan W. Wilkinson", email = "keenan@wustl.edu" } ]
+description = "Command line tool for interacting with OHIF via XNAT."
+dependencies = [
+    "click>=8.1.7",
+    "colorama>=0.4.6",
+    "httpx>=0.25.1",
+    "pydicom>=2.4.3"]
+dynamic = [ "version" ]
+license = { file = "LICENSE.md" }
+name = "ohif"
+requires-python = ">=3.10"
+
+[project.scripts]
+ohif = "ohif:from_command_line"
+
+[options]
+exclude = "test"
+
+[tool.setuptools.dynamic]
+version = { attr = "ohif.__version__" }
