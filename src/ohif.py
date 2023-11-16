@@ -2,6 +2,7 @@ __version__ = (0, 1, 0)
 
 import contextlib
 import dataclasses
+import http
 import netrc
 import pathlib
 import typing
@@ -9,11 +10,8 @@ import urllib.parse
 
 import click
 import httpx
+import magic
 import pydicom
-
-# Byte series found in DICOM files. Used to confirm
-# file is DICOM.
-DICOM_MAGIC_BYTES = b"DICM"
 
 
 @dataclasses.dataclass
@@ -60,10 +58,7 @@ def dicom_isdicom_file(path: pathlib.Path):
     if path.is_dir():
         return False
 
-    with path.open("rb") as fd:
-        magic_bytes = fd.read(132)[128:]
-
-    return magic_bytes == DICOM_MAGIC_BYTES
+    return magic.from_file(str(path)) == "DICOM medical imaging data"
 
 
 @contextlib.contextmanager
@@ -78,10 +73,11 @@ def rest_attempt():
         yield
     except httpx.HTTPStatusError as error:
         method, path = request_extractor(error)
-        code = error.response.status_code
+        code   = error.response.status_code
+        phrase = http.HTTPStatus(code).phrase
         click.echo(
             f"{click.style('error', fg='red')}: "
-            f"({method}) {path} failed: {error} ({code})",
+            f"({method}) {path} failed: <{code} {phrase}>",
             err=True)
         quit(1)
     except httpx.RequestError as error:

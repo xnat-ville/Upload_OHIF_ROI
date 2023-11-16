@@ -9,7 +9,8 @@ dependencies = [
     "click>=8.1.7",
     "colorama>=0.4.6",
     "httpx>=0.25.1",
-    "pydicom>=2.4.3"]
+    "pydicom>=2.4.3",
+    "python-magic>=0.4.27"]
 dynamic = [ "version" ]
 license = { file = "LICENSE.md" }
 name = "ohif"
