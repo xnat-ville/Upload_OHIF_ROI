@@ -168,6 +168,7 @@ def dicom_isroi_type(path: pathlib.Path, roi_type: str | ROIType) -> bool:
 def dicom_set(
         path: pathlib.Path,
         key: str | tuple[int, int],
+        VR: str,
         value: typing.Any) -> None:
     """Set the field value of a DICOM header."""
 
@@ -175,7 +176,7 @@ def dicom_set(
         raise ValueError(f"{path!r} is not a valid DICOM image file.")
 
     dicom = pydicom.dcmread(path)
-    setattr(dicom, key, value) #type: ignore[arg-type]
+    dicom[key] = pydicom.DataElement(key, VR, value)
     pydicom.dcmwrite(path, dicom)
 
 
@@ -326,10 +327,13 @@ def rest_ohif_roi_store(
         for file, fd in files:
             if not dicom_isroi_type(file, roi_type):
                 continue
-            # Validate that `SoftwareVersions` is
-            # set, and if not, set to "Unknown".
+            # Validate fields are not missing or
+            # unset, and if not, set to "Unknown".
             if not dicom_get(file, "SoftwareVersions", ""):
-                dicom_set(file, "SoftwareVersions", "Unknown")
+                dicom_set(file, "SoftwareVersions", "LO", "Unknown")
+
+            if dicom_get(file, "StudyID", "") in ("Unknown", ""):
+                dicom_set(file, "StudyID", "SH", "0")
 
             # Parse the label as either a user
             # given input, or as the series
