@@ -3,10 +3,10 @@ __version__ = (0, 1, 0)
 import contextlib
 import dataclasses
 import enum
+import functools
 import http
 import netrc
 import pathlib
-import sys
 import typing
 import urllib.parse
 
@@ -57,6 +57,7 @@ class OHIFNamespace:
     username: typing.Optional[str]
     password: typing.Optional[str]
     port:     typing.Optional[int]
+    verbose:  int
 
 
 # Used to pass the top-level namespace context
@@ -187,6 +188,23 @@ def ohif_error(*values: str, sep: str | None = None) -> None:
     click.echo(message, err=True)
 
 
+def ohif_info(
+        namespace: OHIFNamespace,
+        *values: str,
+        sep: str | None = None,
+        level: int | None = None) -> None:
+    """
+    Write a message to `stdout`. Outputs only if
+    `namespace.verbose` is greater than or equal
+    to `level`.
+    """
+
+    if namespace.verbose < (level or 0):
+        return None
+    message = f"{click.style('info', fg='green')}: " + (sep or " ").join(values)
+    click.echo(message)
+
+
 def ohif_panic(
         *values: str,
         sep: str | None = None,
@@ -197,33 +215,18 @@ def ohif_panic(
     quit(code or 1)
 
 
-@contextlib.contextmanager
-def rest_attempt(*, strict: bool | None = None):
+def ohif_strict_quitter(
+        code: int | None = None,
+        *,
+        strict: bool | None = None) -> None | typing.NoReturn:
     """
-    Catches RESTful exceptions and handles them.
+    Exits the program using the built-in `quit`
+    call if called with `strict` as `True`.
     """
 
-    def request_extractor(err: httpx.HTTPError):
-        return err.request.method, err.request.url.path
-
-    def strict_quitter(i: int):
-        if strict in (True, None):
-            quit(i)
-
-    try:
-        yield
-    except httpx.HTTPStatusError as error:
-        method, path = request_extractor(error)
-        code   = error.response.status_code
-        phrase = http.HTTPStatus(code).phrase
-        ohif_error(f"({method}) {path} failed: <{code} {phrase}>")
-        if error.response.text:
-            click.echo(error.response.text, err=True)
-        strict_quitter(1)
-    except httpx.RequestError as error:
-        method, path = request_extractor(error)
-        ohif_error(f"({method}) {path} failed: {error}")
-        strict_quitter(1)
+    if (strict := strict if strict is not None else True):
+        quit(code)
+    return None
 
 
 def rest_auth(namespace: OHIFNamespace) -> httpx.Auth:
@@ -237,26 +240,42 @@ def rest_auth(namespace: OHIFNamespace) -> httpx.Auth:
     return httpx.BasicAuth(username, password)
 
 
+@contextlib.contextmanager
 def rest_client(
         namespace: OHIFNamespace,
         *,
+        strict: typing.Optional[bool] = None,
         verify: typing.Optional[bool] = None):
     """
     Create a REST client to make calls against the
-    remote XNAT.
+    remote XNAT. HTTP exceptions raised in this
+    context will panic, writing a message to
+    stderr.
     """
 
     client = httpx.Client(
         auth=rest_auth(namespace),
         base_url=rest_host(namespace),
         verify=verify if verify is not None else True)
-    return client
+
+    try:
+        yield client
+    except httpx.HTTPStatusError as error:
+        method, path, code, phrase = rest_error_extractor(error)
+        ohif_error(f"({method}) {path} failed: <{code} {phrase!r}>")
+        if error.response.text:
+            click.echo(error.response.text, err=True)
+        ohif_strict_quitter(1, strict=strict)
+    except httpx.RequestError as error:
+        method, path, *_ = rest_error_extractor(error)
+        ohif_error(f"({method}) {path} failed: {error}")
+        ohif_strict_quitter(1, strict=strict)
 
 
 def rest_host(namespace: OHIFNamespace) -> str:
     """Parse host base URL."""
 
-    # Weed out the port number
+    # Weed out the port number.
     host  = namespace.host
     colon = host.rfind(":")
     if ":" in host and "//" not in host[colon:]:
@@ -298,6 +317,7 @@ def rest_ohif_roi_store(
     store an ROI collection.
     """
 
+    oinfo = functools.partial(ohif_info, namespace)
     uri_template = "/".join([
         "",
         "xapi",
@@ -310,8 +330,6 @@ def rest_ohif_roi_store(
         "{label}"
     ])
 
-    rest = rest_client(namespace)
-
     headers = dict()
     headers["Content-Type"] = "application/octet-stream"
 
@@ -321,26 +339,35 @@ def rest_ohif_roi_store(
     params["type"]      = roi_type
 
     with contextlib.ExitStack() as es:
-        es.enter_context(rest_attempt(strict=False))
         files = ((f, es.enter_context(f.open("rb"))) for f in namespace.files)
+        rest  = es.enter_context(rest_client(namespace, strict=False))
 
+        oinfo(f"found {len(namespace.files)} DICOM files.", level=1)
+        oinfo(f"pushing to store {roi_type} data.")
         for file, fd in files:
             if not dicom_isroi_type(file, roi_type):
+                oinfo(f"{file!s} modality is not of type {roi_type}.", level=3)
+                oinfo(f"skipping.", level=3)
                 continue
+            dgetter = functools.partial(dicom_get, file)
+            dsetter = functools.partial(dicom_set, file)
+
             # Validate fields are not missing or
             # unset, and if not, set to "Unknown".
-            if not dicom_get(file, "SoftwareVersions", ""):
-                dicom_set(file, "SoftwareVersions", "LO", "Unknown")
+            field = dgetter("SoftwareVersions", "")
+            if not field:
+                oinfo(f"Fixing SoftwareVersions with field {field!r}", level=3)
+                dsetter("SoftwareVersions", "LO", "Unknown")
 
-            if dicom_get(file, "StudyID", "") in ("Unknown", ""):
-                dicom_set(file, "StudyID", "SH", "0")
+            field = dgetter("StudyID", "")
+            if field in ("Unknown", ""):
+                oinfo(f"Fixing StudyID with field {field!r}", level=3)
+                dsetter("StudyID", "SH", "0")
 
             # Parse the label as either a user
             # given input, or as the series
             # description from DICOM file.
-            rlabel = (
-                (label or dicom_get(file, "SeriesDescription"))
-                .replace(" ", "_"))
+            rlabel = label or dgetter("SeriesDescription").replace(" ", "_") #type: ignore[attr-defined]
 
             # Assign parameters based on headers
             # found in DICOM.
@@ -353,13 +380,35 @@ def rest_ohif_roi_store(
                 headers=headers,
                 params=rparams)
             r.raise_for_status()
+            oinfo(f"(PUT) {r.url.path} ({r.status_code})", level=2)
+
+        oinfo("done.", level=2)
+
+
+def rest_error_extractor(err: httpx.HTTPError) -> tuple[str, str, int, str]:
+    """
+    Extract error information from an
+    `httpx.HTTPError`.
+    """
+
+    args = [
+        err.request.method,
+        err.request.url.path,
+        500,
+        "Internal Server Error"]
+
+    if isinstance(err, httpx.HTTPStatusError):
+        status_code = err.response.status_code
+        args[2] = status_code
+        args[3] = http.HTTPStatus(status_code).phrase
+
+    return tuple(args) #type: ignore[return-value]
 
 
 def rest_username(namespace: OHIFNamespace) -> str:
     """Get the REST username."""
 
-    rest = rest_client(namespace)
-    with rest_attempt():
+    with rest_client(namespace) as rest:
         r = rest.get("/xapi/users/username")
         r.raise_for_status()
 
@@ -368,20 +417,23 @@ def rest_username(namespace: OHIFNamespace) -> str:
 
 @click.group()
 @click.pass_context
+@click.version_option(".".join(map(str, __version__)))
 @click.option("--host", "-h")
 @click.option("--username", "-u", default=None)
 @click.option("--password", "-p", default=None)
 @click.option("--port", "-P", type=int, default=None)
+@click.option("--verbose", "-v", count=True)
 def ohif(
     ctx: click.Context,
     *,
     host: str,
     username: typing.Optional[str],
     password: typing.Optional[str],
-    port: typing.Optional[int]):
+    port: typing.Optional[int],
+    verbose: int):
     """Manage OHIF via XNAT."""
 
-    ctx.obj = OHIFNamespace(host, (), username, password, port)
+    ctx.obj = OHIFNamespace(host, (), username, password, port, verbose)
     # Validate that credentials are valid by first
     # making an attempt to get their username.
     rest_username(ctx.obj)
