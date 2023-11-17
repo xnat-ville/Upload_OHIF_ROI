@@ -2,9 +2,11 @@ __version__ = (0, 1, 0)
 
 import contextlib
 import dataclasses
+import enum
 import http
 import netrc
 import pathlib
+import sys
 import typing
 import urllib.parse
 
@@ -12,6 +14,40 @@ import click
 import httpx
 import magic
 import pydicom
+import pydicom.tag
+
+
+class ROIType(enum.StrEnum):
+    """OHIF ROI supported DICOM types."""
+
+    _header_: str | tuple[int, int]
+    _modal_: str | typing.Sequence[str]
+
+    @property
+    def header(self):
+        """DICOM header name or tag."""
+
+        return self._header_
+
+    @property
+    def modal(self):
+        """
+        Modality or sequence of modalities
+        compatible with this ROI type.
+        """
+
+        return self._modal_
+
+    def __new__(cls, value, modal="", header="SOPClassUID"):
+        obj = str.__new__(cls, value)
+        obj._value_  = value
+        obj._header_ = header
+        obj._modal_  = modal
+
+        return obj
+
+    Segmentation_Storage = "1.2.840.10008.5.1.4.1.1.66.4", "SEG"
+    SEG = Segmentation_Storage
 
 
 @dataclasses.dataclass
@@ -47,7 +83,59 @@ def auth_netrc(namespace: OHIFNamespace) -> tuple[str, str]:
     return (netrc.netrc().authenticators(host) or default)[::2]
 
 
-def dicom_isdicom_file(path: pathlib.Path):
+def dicom_find_files(*paths: pathlib.Path, strict: bool | None = None) -> typing.Sequence[pathlib.Path]:
+    """
+    Find all files in given directories. Validate
+    that files are DICOM image files.
+    """
+
+    files = []
+
+    for path in paths:
+        if not path.is_dir() and dicom_isdicom_file(path):
+            files.append(path)
+            continue
+        elif not path.is_dir() and strict in (True, None):
+            raise ValueError(f"{path!r} is not a valid DICOM image file.")
+
+        for dpath, _, dpath_files in path.walk():
+            if not dpath_files:
+                continue
+            files.extend(dicom_find_files(
+                *map(dpath.joinpath, dpath_files),
+                strict=False))
+
+    return tuple(files)
+
+
+T = typing.TypeVar("T")
+@typing.overload
+def dicom_get(
+    path: pathlib.Path,
+    key: tuple[int, int]) -> pydicom.DataElement:
+    pass
+@typing.overload
+def dicom_get(
+    path: pathlib.Path, key: tuple[int, int],
+    default: T) -> pydicom.DataElement | T:
+    pass
+@typing.overload
+def dicom_get(path: pathlib.Path, key: str) -> typing.Any:
+    pass
+@typing.overload
+def dicom_get( #type: ignore
+    path: pathlib.Path,
+    key: str, default: T) -> typing.Any | T:
+    pass
+def dicom_get(path, key, default=...):
+    """Retrieve header element from DICOM image."""
+
+    if default != Ellipsis:
+        return pydicom.dcmread(path).get(key)
+    return pydicom.dcmread(path).get(key, default)
+
+
+def dicom_isdicom_file(path: pathlib.Path) -> bool:
     """
     Given path is a file, exists, and is a DICOM
     file.
@@ -61,13 +149,65 @@ def dicom_isdicom_file(path: pathlib.Path):
     return magic.from_file(str(path)) == "DICOM medical imaging data"
 
 
+def dicom_isroi_type(path: pathlib.Path, roi_type: str | ROIType) -> bool:
+    """
+    Path is to valid DICOM file and DICOM headers
+    indicate the file is a valid ROI file.
+    """
+
+    if not dicom_isdicom_file(path):
+        raise ValueError(f"{path!r} is not a valid DICOM image file.")
+
+    roi_type = ROIType[roi_type] if isinstance(roi_type, str) else roi_type
+    return (
+        dicom_isdicom_file(path) and
+        dicom_get(path, roi_type.header) == roi_type.value and #type: ignore[union-attr]
+        dicom_get(path, "Modality") in roi_type.modal) #type: ignore[union-attr]
+
+
+def dicom_set(
+        path: pathlib.Path,
+        key: str | tuple[int, int],
+        value: typing.Any) -> None:
+    """Set the field value of a DICOM header."""
+
+    if not dicom_isdicom_file(path):
+        raise ValueError(f"{path!r} is not a valid DICOM image file.")
+
+    dicom = pydicom.dcmread(path)
+    setattr(dicom, key, value) #type: ignore[arg-type]
+    pydicom.dcmwrite(path, dicom)
+
+
+def ohif_error(*values: str, sep: str | None = None) -> None:
+    """Write a message to `stderr`."""
+
+    message = f"{click.style('error', fg='red')}: " + (sep or " ").join(values)
+    click.echo(message, err=True)
+
+
+def ohif_panic(
+        *values: str,
+        sep: str | None = None,
+        code: int | None = None) -> typing.NoReturn:
+    """Write message to `stderr` and quit."""
+
+    ohif_error(*values, sep=sep)
+    quit(code or 1)
+
+
 @contextlib.contextmanager
-def rest_attempt():
+def rest_attempt(*, strict: bool | None = None):
     """
     Catches RESTful exceptions and handles them.
     """
 
-    request_extractor = lambda err: (err.request.method, err.request.url.path)
+    def request_extractor(err: httpx.HTTPError):
+        return err.request.method, err.request.url.path
+
+    def strict_quitter(i: int):
+        if strict in (True, None):
+            quit(i)
 
     try:
         yield
@@ -75,18 +215,14 @@ def rest_attempt():
         method, path = request_extractor(error)
         code   = error.response.status_code
         phrase = http.HTTPStatus(code).phrase
-        click.echo(
-            f"{click.style('error', fg='red')}: "
-            f"({method}) {path} failed: <{code} {phrase}>",
-            err=True)
-        quit(1)
+        ohif_error(f"({method}) {path} failed: <{code} {phrase}>")
+        if error.response.text:
+            click.echo(error.response.text, err=True)
+        strict_quitter(1)
     except httpx.RequestError as error:
         method, path = request_extractor(error)
-        click.echo(
-            f"{click.style('error', fg='red')}: "
-            f"({method}) {path} failed: {error}",
-            err=True)
-        quit(1)
+        ohif_error(f"({method}) {path} failed: {error}")
+        strict_quitter(1)
 
 
 def rest_auth(namespace: OHIFNamespace) -> httpx.Auth:
@@ -153,17 +289,13 @@ def rest_ohif_roi_store(
     project: str,
     session: str,
     *,
-    overwrite: typing.Optional[bool] = None):
+    label: typing.Optional[str],
+    roi_type: str,
+    overwrite: bool):
     """
     Attempt to send a PUT request to XNAT to
     store an ROI collection.
     """
-
-    if not namespace.files:
-        click.echo(
-            f"{click.style('error', fg='red')}: no files were provided",
-            err=True)
-        quit(1)
 
     uri_template = "/".join([
         "",
@@ -184,25 +316,38 @@ def rest_ohif_roi_store(
 
     params = dict()
     params["overwrite"] = str(overwrite or False).lower()
-    params["seriesuid"] = None #type: ignore[assignment]
-    params["type"]      = None #type: ignore[assignment]
+    params["seriesuid"] = ""
+    params["type"]      = roi_type
 
     with contextlib.ExitStack() as es:
-        es.enter_context(rest_attempt())
+        es.enter_context(rest_attempt(strict=False))
         files = ((f, es.enter_context(f.open("rb"))) for f in namespace.files)
 
         for file, fd in files:
-            dcm_data = pydicom.dcmread(file)
-            uri = uri_template.format(
-                label=dcm_data[(0x0008, 0x103e)].value.replace(" ", "_"))
+            if not dicom_isroi_type(file, roi_type):
+                continue
+            # Validate that `SoftwareVersions` is
+            # set, and if not, set to "Unknown".
+            if not dicom_get(file, "SoftwareVersions", ""):
+                dicom_set(file, "SoftwareVersions", "Unknown")
+
+            # Parse the label as either a user
+            # given input, or as the series
+            # description from DICOM file.
+            rlabel = (
+                (label or dicom_get(file, "SeriesDescription"))
+                .replace(" ", "_"))
 
             # Assign parameters based on headers
             # found in DICOM.
-            rparams  = params.copy()
-            rparams["seriesuid"] = dcm_data[(0x0020, 0x000e)].value
-            rparams["type"]      = dcm_data[(0x0008, 0x0060)].value
+            rparams = params.copy()
+            rparams["seriesuid"] = dicom_get(file, "SeriesInstanceUID")
 
-            r = rest.put(uri, data=fd, headers=headers, params=rparams)
+            r = rest.put(
+                uri_template.format(label=rlabel),
+                data=fd,
+                headers=headers,
+                params=rparams)
             r.raise_for_status()
 
 
@@ -249,39 +394,41 @@ def roi():
 @pass_clinamespace
 @click.argument("project")
 @click.argument("session")
-@click.option("--file", "-f", "files", type=pathlib.Path, multiple=True)
 @click.option(
     "--overwrite/--create",
     "-O/",
     "overwrite",
     help="create or overwrite collection")
+@click.option("--file", "-f", "files", type=pathlib.Path, multiple=True)
+@click.option("--label", "-l", default=None)
+@click.option(
+    "--type",
+    "-t",
+    "roi_type",
+    type=click.Choice(["AIM", "RTSTRUCT", "SEG"]),
+    default="SEG")
 def store(
     namespace: OHIFNamespace,
     project: str,
     session: str,
     *,
     files: typing.Sequence[pathlib.Path],
+    label: typing.Optional[str],
+    roi_type: str,
     overwrite: bool):
     """Store an ROI collection."""
 
-    # Filter out directories from files. Replace
-    # directories with files found in subtree.
-    dirs  = filter(lambda p: p.is_dir(), files)
-    files = [p for p in files if not p.is_dir()]
-
-    for path in dirs:
-        for dpath, _, dpath_files in path.walk():
-            if not dpath_files:
-                continue
-            # Filter out non-DICOM files
-            files_map = map(dpath.joinpath, dpath_files)
-            files.extend(filter(dicom_isdicom_file, files_map))
+    files = dicom_find_files(*files)
+    if not files:
+        ohif_panic("no files were provided")
 
     namespace.files = files
     rest_ohif_roi_store(
         namespace,
         project,
         session,
+        label=label,
+        roi_type=roi_type,
         overwrite=overwrite)
 
 
