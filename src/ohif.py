@@ -7,6 +7,8 @@ import functools
 import http
 import netrc
 import pathlib
+import shutil
+import tempfile
 import typing
 import urllib.parse
 
@@ -131,7 +133,7 @@ def dicom_get( #type: ignore
 def dicom_get(path, key, default=...):
     """Retrieve header element from DICOM image."""
 
-    if default != Ellipsis:
+    if default == Ellipsis:
         return pydicom.dcmread(path).get(key)
     return pydicom.dcmread(path).get(key, default)
 
@@ -339,16 +341,21 @@ def rest_ohif_roi_store(
     params["type"]      = roi_type
 
     with contextlib.ExitStack() as es:
-        files = ((f, es.enter_context(f.open("rb"))) for f in namespace.files)
         rest  = es.enter_context(rest_client(namespace, strict=False))
+        twd   = pathlib.Path(es.enter_context(tempfile.TemporaryDirectory()))
 
         oinfo(f"found {len(namespace.files)} DICOM files.", level=1)
         oinfo(f"pushing to store {roi_type} data.")
-        for file, fd in files:
+        for file in namespace.files:
             if not dicom_isroi_type(file, roi_type):
                 oinfo(f"{file!s} modality is not of type {roi_type}.", level=3)
                 oinfo(f"skipping.", level=3)
                 continue
+
+            oinfo(f"Attempting to push {file!s}", level=4)
+            shutil.copyfile(str(file), str(twd.joinpath("image.dcm")))
+            file = twd.joinpath("image.dcm")
+
             dgetter = functools.partial(dicom_get, file)
             dsetter = functools.partial(dicom_set, file)
 
@@ -359,10 +366,10 @@ def rest_ohif_roi_store(
                 oinfo(f"Fixing SoftwareVersions with field {field!r}", level=3)
                 dsetter("SoftwareVersions", "LO", "Unknown")
 
-            field = dgetter("StudyID", "")
-            if field in ("Unknown", ""):
+            field = dgetter("StudyID", None)
+            if field in ("", None):
                 oinfo(f"Fixing StudyID with field {field!r}", level=3)
-                dsetter("StudyID", "SH", "0")
+                dsetter("StudyID", "SH", "Unknown")
 
             # Parse the label as either a user
             # given input, or as the series
@@ -376,7 +383,7 @@ def rest_ohif_roi_store(
 
             r = rest.put(
                 uri_template.format(label=rlabel),
-                data=fd,
+                data=es.enter_context(file.open("rb")),
                 headers=headers,
                 params=rparams)
             r.raise_for_status()

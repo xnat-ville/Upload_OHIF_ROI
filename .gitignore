@@ -1,3 +1,9 @@
+# MISC artifacts.
+*.zip
+*.tar*
+*.tz*
+*.gzip*
+
 # Environment files and dirs.
 .venv/
 .vscode/
@@ -5,7 +11,7 @@
 # Application generated files and dirs.
 logs/
 data/
-test/
+example/
 
 # Build artifacts.
 build/
