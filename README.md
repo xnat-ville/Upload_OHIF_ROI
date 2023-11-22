@@ -12,9 +12,13 @@ This software requires the use of Python3.10 or greater.
 $ python3 -m pip install git+https://github.com/xnat-ville/Upload_OHIF_ROI.git
 ```
 
+If you are using **PyOHIF** in a container, ensure the container has
+access to git as well as a python interpreter.
+
+
 ## Usage ##
-Once pyOHIF has been installed, you should be able to run the following to
-access it:
+Once **pyOHIF** has been installed, you should be able to run the
+following to access it:
 
 ```bash
 $ ohif --version
