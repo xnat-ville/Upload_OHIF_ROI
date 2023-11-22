@@ -487,11 +487,12 @@ def store(
     overwrite: bool):
     """Store an ROI collection."""
 
+    if not namespace.host:
+        ohif_panic("no hostname was provided")
+
     files = dicom_find_files(*files)
     if not files:
         ohif_panic("no files were provided")
-    if not namespace.host:
-        ohif_panic("Missing option '--host' / '-h'")
 
     namespace.files = files
     rest_ohif_roi_store(
