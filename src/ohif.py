@@ -6,6 +6,7 @@ import enum
 import functools
 import http
 import netrc
+import os
 import pathlib
 import shutil
 import tempfile
@@ -83,7 +84,10 @@ def auth_netrc(namespace: OHIFNamespace) -> tuple[str, str]:
     host_parsed = urllib.parse.urlparse(host)
     host = host_parsed.netloc or host_parsed.path
 
-    return (netrc.netrc().authenticators(host) or default)[::2]
+    try:
+        return (netrc.netrc().authenticators(host) or default)[::2]
+    except FileNotFoundError:
+        return ("", "")
 
 
 def dicom_find_files(*paths: pathlib.Path, strict: bool | None = None) -> typing.Sequence[pathlib.Path]:
@@ -101,11 +105,12 @@ def dicom_find_files(*paths: pathlib.Path, strict: bool | None = None) -> typing
         elif not path.is_dir() and strict in (True, None):
             raise ValueError(f"{path!r} is not a valid DICOM image file.")
 
-        for dpath, _, dpath_files in path.walk():
+        for dpath, _, dpath_files in os.walk(path):
+            dpath = pathlib.Path(dpath) #type: ignore[assignment]
             if not dpath_files:
                 continue
             files.extend(dicom_find_files(
-                *map(dpath.joinpath, dpath_files),
+                *map(dpath.joinpath, dpath_files), #type: ignore[attr-defined]
                 strict=False))
 
     return tuple(files)
