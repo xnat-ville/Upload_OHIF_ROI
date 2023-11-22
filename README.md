@@ -15,14 +15,25 @@ $ python3 -m pip install git+https://github.com/xnat-ville/Upload_OHIF_ROI.git
 If you are using **PyOHIF** in a container, ensure the container has
 access to git as well as a python interpreter.
 
-### For Windows Users ###
-Additional DLLs may be required in order to use some **PyOHIF**
-features.
+### For Windows or Mac Users ###
+Additional libraries may be required in order to use some **PyOHIF**
+features. On Windows you will want to run the following to install the
+DLL files.
 
 ```bash
 # This will install the DLL files required to
 # make calls to `libmagic`, a dependency of PyOHIF.
 $ python3 -m pip install python-magic-bin
+```
+
+For MacOS installation will require `libmagic` or `file` depending on
+your package manager
+```zsh
+# For homebrew
+$ brew install libmagic
+
+# For macports
+$ port install file
 ```
 
 ## Usage ##
