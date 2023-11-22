@@ -1,4 +1,4 @@
-# pyOHIF CLI #
+# PyOHIF CLI #
 
 Command line tool for interacting with OHIF via XNAT.
 
@@ -17,7 +17,7 @@ access to git as well as a python interpreter.
 
 
 ## Usage ##
-Once **pyOHIF** has been installed, you should be able to run the
+Once **PyOHIF** has been installed, you should be able to run the
 following to access it:
 
 ```bash
