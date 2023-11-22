@@ -21,7 +21,7 @@ $ ohif --version
 ohif, version 0.1.0
 ```
 
-And using the `-h`/`--help` option to view your available options.
+Or by using `-h`/`--help` to view your available options.
 
 ```bash
 $ ohif --help
