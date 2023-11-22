@@ -9,5 +9,5 @@ will have access to the application as a **CLI** tool
 This software requires the use of Python3.10 or greater.
 
 ```bash
-$ python3 -m pip install git+http:///github.com/xnat-ville/Upload_OHIF_ROI.git
+$ python3 -m pip install git+https://github.com/xnat-ville/Upload_OHIF_ROI.git
 ```
