@@ -430,7 +430,7 @@ def rest_username(namespace: OHIFNamespace) -> str:
 @click.group()
 @click.pass_context
 @click.version_option(".".join(map(str, __version__)))
-@click.option("--host", "-h")
+@click.option("--host", "-H")
 @click.option("--username", "-u", default=None)
 @click.option("--password", "-p", default=None)
 @click.option("--port", "-P", type=int, default=None)
@@ -448,7 +448,8 @@ def ohif(
     ctx.obj = OHIFNamespace(host, (), username, password, port, verbose)
     # Validate that credentials are valid by first
     # making an attempt to get their username.
-    rest_username(ctx.obj)
+    if host:
+        rest_username(ctx.obj)
 
     return 0
 
@@ -489,6 +490,8 @@ def store(
     files = dicom_find_files(*files)
     if not files:
         ohif_panic("no files were provided")
+    if not namespace.host:
+        ohif_panic("Missing option '--host' / '-h'")
 
     namespace.files = files
     rest_ohif_roi_store(
