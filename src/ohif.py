@@ -1,4 +1,4 @@
-__version__ = (0, 1, 4)
+__version__ = (0, 1, 6)
 
 import contextlib
 import dataclasses
@@ -696,7 +696,7 @@ class RESTOHIF:
         params["seriesuid"] = dicom_get(file, "SeriesInstanceUID")
 
         with contextlib.ExitStack() as es:
-            rest  = es.enter_context(rest_client(namespace, strict=False))
+            rest  = es.enter_context(rest_client(namespace))
             twd = pathlib.Path(es.enter_context(tempfile.TemporaryDirectory()))
 
             ohif_info(namespace, f"attempting to push {file!s}", level=2)
