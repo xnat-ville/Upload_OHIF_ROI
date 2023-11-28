@@ -1,4 +1,4 @@
-__version__ = (0, 1, 3)
+__version__ = (0, 1, 4)
 
 import contextlib
 import dataclasses
@@ -54,6 +54,31 @@ class ROIType(enum.StrEnum):
 
 
 @dataclasses.dataclass
+class XNATExperiment:
+    date:                 str
+    dcmPatientBirthDate:  str
+    dcmPatientId:         str
+    dcmPatientName:       str
+    ID:                   str
+    id:                   str
+    label:                str
+    prearchivePath:       str
+    project:              str
+    scanner_manufacturer: str
+    scanner_model:        str
+    session_type:         str
+    subject_ID:           str
+    UID:                  str
+
+
+@dataclasses.dataclass
+class XNATSubject:
+    ID:      str
+    label:   str
+    project: str
+
+
+@dataclasses.dataclass
 class OHIFNamespace:
     host:     str
     files:    typing.Sequence[pathlib.Path]
@@ -90,7 +115,9 @@ def auth_netrc(namespace: OHIFNamespace) -> tuple[str, str]:
         return ("", "")
 
 
-def dicom_find_files(*paths: pathlib.Path, strict: bool | None = None) -> typing.Sequence[pathlib.Path]:
+def dicom_find_files(
+        *paths: pathlib.Path,
+        strict: bool | None = None) -> typing.Sequence[pathlib.Path]:
     """
     Find all files in given directories. Validate
     that files are DICOM image files.
@@ -112,6 +139,13 @@ def dicom_find_files(*paths: pathlib.Path, strict: bool | None = None) -> typing
             files.extend(dicom_find_files(
                 *map(dpath.joinpath, dpath_files), #type: ignore[attr-defined]
                 strict=False))
+
+    # Validate that the files found all have the
+    # same StudyInstanceUID value.
+    study_instance_uids = {dicom_get(f, "StudyInstanceUID") for f in files}
+    if len(study_instance_uids) > 1:
+        ohif_error("Files found have more than one StudyInstanceUID")
+        ohif_panic(f"Found in files {study_instance_uids}")
 
     return tuple(files)
 
@@ -268,15 +302,36 @@ def rest_client(
     try:
         yield client
     except httpx.HTTPStatusError as error:
-        method, path, code, phrase = rest_error_extractor(error)
+        method, path, code, phrase = rest_extract_error(error)
         ohif_error(f"({method}) {path} failed: <{code} {phrase!r}>")
         if error.response.text:
             click.echo(error.response.text, err=True)
         ohif_strict_quitter(1, strict=strict)
     except httpx.RequestError as error:
-        method, path, *_ = rest_error_extractor(error)
+        method, path, *_ = rest_extract_error(error)
         ohif_error(f"({method}) {path} failed: {error}")
         ohif_strict_quitter(1, strict=strict)
+
+
+
+def rest_extract_error(err: httpx.HTTPError) -> tuple[str, str, int, str]:
+    """
+    Extract error information from an
+    `httpx.HTTPError`.
+    """
+
+    args = [
+        err.request.method,
+        err.request.url.path,
+        500,
+        "Internal Server Error"]
+
+    if isinstance(err, httpx.HTTPStatusError):
+        status_code = err.response.status_code
+        args[2] = status_code
+        args[3] = http.HTTPStatus(status_code).phrase
+
+    return tuple(args) #type: ignore[return-value]
 
 
 def rest_host(namespace: OHIFNamespace) -> str:
@@ -311,120 +366,309 @@ def rest_host(namespace: OHIFNamespace) -> str:
     return  uri
 
 
-def rest_ohif_roi_store(
-    namespace: OHIFNamespace,
-    project: str,
-    session: str,
-    *,
-    label: typing.Optional[str],
-    roi_type: str,
-    overwrite: bool):
+class REST:
     """
-    Attempt to send a PUT request to XNAT to
-    store an ROI collection.
+    Common RESTful operations against an XNAT.
     """
 
-    oinfo = functools.partial(ohif_info, namespace)
-    uri_template = "/".join([
-        "",
-        "xapi",
-        "roi",
-        "projects",
-        project, # projectId
-        "sessions",
-        session, # sessionId
-        "collections",
-        "{label}"
-    ])
+    @classmethod
+    def _object_getter(
+        cls,
+        namespace: OHIFNamespace,
+        uri: str) -> dict[str, str]:
+        """
+        Get the raw contents of an object from an
+        XNAT.
+        """
 
-    headers = dict()
-    headers["Content-Type"] = "application/octet-stream"
+        with rest_client(namespace, strict=True) as rest:
+            r = rest.get(uri, params=dict(format="json"))
+            r.raise_for_status()
 
-    params = dict()
-    params["overwrite"] = str(overwrite or False).lower()
-    params["seriesuid"] = ""
-    params["type"]      = roi_type
+            ohif_info(
+                namespace,
+                f"(GET) {r.url.path} ({r.status_code})",
+                level=4)
+            return r.json()["items"][0]["data_fields"]
 
-    with contextlib.ExitStack() as es:
-        rest  = es.enter_context(rest_client(namespace, strict=False))
-        twd   = pathlib.Path(es.enter_context(tempfile.TemporaryDirectory()))
+    @classmethod
+    def _object_putter(cls, namespace: OHIFNamespace, uri: str) -> str:
+        """
+        Raw PUT request for some XNAT endpoint.
+        """
 
-        oinfo(f"found {len(namespace.files)} DICOM files.", level=1)
-        oinfo(f"pushing to store {roi_type} data.")
+        with rest_client(namespace, strict=True) as rest:
+            r = rest.put(uri)
+            r.raise_for_status()
+
+            ohif_info(
+                namespace,
+                f"(PUT) {r.url.path} ({r.status_code})",
+                level=4)
+            return r.text
+
+    @classmethod
+    def aquire_session(
+            cls,
+            namespace: OHIFNamespace,
+            project: str,
+            subject: str,
+            session: str) -> XNATExperiment:
+        """
+        Attempt to get an existing session. If
+        none exists on the remote XNAT, create the
+        instance and return the created session.
+        """
+
+        getter = functools.partial(cls.get_session, namespace, project)
+        putter = functools.partial(cls.put_session, namespace, project)
+
+        try:
+            return getter(session)
+        except httpx.HTTPStatusError:
+            putter(subject, session)
+            return getter(session)
+
+    @classmethod
+    def aquire_subject(
+            cls,
+            namespace: OHIFNamespace,
+            project: str,
+            subject: str):
+        """
+        Attempt to get an existing subject. If
+        none exists on the remote XNAT, create the
+        instance and return the created subject.
+        """
+
+        common_args = namespace, project, subject
+        getter = functools.partial(cls.get_subject, *common_args)
+        putter = functools.partial(cls.put_subject, *common_args)
+
+        try:
+            return getter()
+        except httpx.HTTPStatusError:
+            putter()
+            return getter()
+
+    @classmethod
+    def get_username(cls, namespace: OHIFNamespace) -> str:
+        """
+        Get the username associated with the REST
+        session.
+        """
+
+        with rest_client(namespace, strict=True) as rest:
+            r = rest.get("/xapi/users/username")
+            r.raise_for_status()
+
+        return r.text
+
+    @classmethod
+    def get_session(
+            cls,
+            namespace: OHIFNamespace,
+            project: str,
+            session: str) -> XNATExperiment:
+        """Get session data from an XNAT."""
+
+        data = cls._object_getter(
+                namespace,
+                f"/data/projects/{project}/experiments/{session}")
+
+        data["scanner_model"]        = data.pop("scanner/model")
+        data["scanner_manufacturer"] = data.pop("scanner/manufacturer")
+        return XNATExperiment(**data)
+
+    @classmethod
+    def get_subject(
+            cls,
+            namespace: OHIFNamespace,
+            project: str,
+            subject: str):
+        """Get subject data from an XNAT."""
+
+        data = cls._object_getter(
+            namespace,
+            f"/data/projects/{project}/subjects/{subject}")
+        return XNATSubject(**data)
+
+    @classmethod
+    def put_session(
+            cls,
+            namespace: OHIFNamespace,
+            project: str,
+            subject: str,
+            session: str) -> str:
+        """
+        Create a new session on a remote XNAT.
+        """
+
+        return cls._object_putter(
+            namespace,
+            f"/data/projects/{project}/subjects/{subject}/experiments/{session}"
+        )
+
+    @classmethod
+    def put_subject(
+        cls,
+        namespace: OHIFNamespace,
+        project: str,
+        subject: str) -> str:
+        """
+        Create a new subject on a remote XNAT.
+        """
+
+        return cls._object_putter(
+            namespace,
+            f"/data/projects/{project}/subjects/{subject}")
+
+
+class RESTOHIF:
+    """Namespace for OHIF related operations."""
+
+    @classmethod
+    def roi_store(
+        cls,
+        namespace: OHIFNamespace,
+        project: str,
+        subject: str,
+        session: str,
+        *,
+        label: typing.Optional[str],
+        roi_type: str,
+        overwrite: bool) -> None:
+        """
+        Attempt to store segment data, and correlating
+        session data, in a remote XNAT.
+        """
+
+        xsession = REST.aquire_session(namespace, project, subject, session)
+        xsubject = REST.aquire_subject(namespace, project, subject)
+
+        ohif_info(
+            namespace,
+            f"found {len(namespace.files)} DICOM files.",
+            level=1)
+        ohif_info(namespace, f"pushing to store {roi_type} data.", level=1)
+
         for file in namespace.files:
+            args = namespace, project, xsubject, xsession, file
+
+            # Push non-ROI data as regular session
+            # data.
             if not dicom_isroi_type(file, roi_type):
-                oinfo(f"{file!s} modality is not of type {roi_type}.", level=3)
-                oinfo(f"skipping.", level=3)
+                cls.roi_store_subject(*args)
                 continue
 
-            oinfo(f"Attempting to push {file!s}", level=4)
+            # Push ROI data as a collection.
+            kwds = dict(label=label, roi_type=roi_type, overwrite=overwrite)
+            cls.roi_store_segment(*args, **kwds) #type: ignore[arg-type]
+        ohif_info(namespace, "done.", level=2)
+
+    @classmethod
+    def roi_store_segment(
+            cls,
+            namespace: OHIFNamespace,
+            project: str,
+            subject: XNATSubject,
+            session: XNATExperiment,
+            file: pathlib.Path,
+            *,
+            label: typing.Optional[str],
+            roi_type: str,
+            overwrite: bool) -> None:
+        """
+        Attempt to send a PUT request to XNAT to
+        store an ROI collection.
+        """
+
+        if not label:
+            label = (
+                dicom_get(file, "SeriesDescription")
+                .replace(" ", "_")
+                .replace(subject.label, session.label)
+        )
+
+        uri = (
+            f"/xapi/roi/projects/{project}"
+            f"/sessions/{session.ID}/collections/{label}")
+
+        headers = dict()
+        headers["Content-Type"] = "application/octet-stream"
+
+        params = dict()
+        params["overwrite"] = str(overwrite or False).lower()
+        params["seriesuid"] = ""
+        params["type"]      = roi_type
+        params["seriesuid"] = dicom_get(file, "SeriesInstanceUID")
+
+        with contextlib.ExitStack() as es:
+            rest  = es.enter_context(rest_client(namespace, strict=False))
+            twd = pathlib.Path(es.enter_context(tempfile.TemporaryDirectory()))
+
+            ohif_info(namespace, f"attempting to push {file!s}", level=4)
+            # Create a copy of the target file to
+            # validate and push to XNAT.
             shutil.copyfile(str(file), str(twd.joinpath("image.dcm")))
             file = twd.joinpath("image.dcm")
+            cls.roi_validate_segment(namespace, file)
 
-            dgetter = functools.partial(dicom_get, file)
-            dsetter = functools.partial(dicom_set, file)
-
-            # Validate fields are not missing or
-            # unset, and if not, set to "Unknown".
-            field = dgetter("SoftwareVersions", "")
-            if not field:
-                oinfo(f"Fixing SoftwareVersions with field {field!r}", level=3)
-                dsetter("SoftwareVersions", "LO", "Unknown")
-
-            field = dgetter("StudyID", None)
-            if field in ("", None):
-                oinfo(f"Fixing StudyID with field {field!r}", level=3)
-                dsetter("StudyID", "SH", "Unknown")
-
-            # Parse the label as either a user
-            # given input, or as the series
-            # description from DICOM file.
-            rlabel = label or dgetter("SeriesDescription").replace(" ", "_") #type: ignore[attr-defined]
-
-            # Assign parameters based on headers
-            # found in DICOM.
-            rparams = params.copy()
-            rparams["seriesuid"] = dicom_get(file, "SeriesInstanceUID")
-
+            # Push validated file to collection. 
             r = rest.put(
-                uri_template.format(label=rlabel),
+                uri,
                 data=es.enter_context(file.open("rb")),
                 headers=headers,
-                params=rparams)
+                params=params)
             r.raise_for_status()
-            oinfo(f"(PUT) {r.url.path} ({r.status_code})", level=2)
+            ohif_info(
+                namespace,
+                f"(PUT) {r.url.path} ({r.status_code})",
+                level=2)
 
-        oinfo("done.", level=2)
+    @classmethod
+    def roi_store_subject(
+            cls,
+            namespace: OHIFNamespace,
+            project: str,
+            subject: XNATSubject,
+            session: XNATExperiment,
+            file: pathlib.Path) -> None:
+        """
+        Attempt to create a session related to segment
+        data from file.
+        """
 
+        assert False, "store subject not yet implemented"
 
-def rest_error_extractor(err: httpx.HTTPError) -> tuple[str, str, int, str]:
-    """
-    Extract error information from an
-    `httpx.HTTPError`.
-    """
+    @classmethod
+    def roi_validate_segment(
+            cls,
+            namespace: OHIFNamespace,
+            file: pathlib.Path) -> None:
+        """
+        Validate a segment file. Ensure data is
+        clean and of what the OHIF plugin
+        expects.
+        """
 
-    args = [
-        err.request.method,
-        err.request.url.path,
-        500,
-        "Internal Server Error"]
+        # Validate fields are not missing or
+        # unset, and if not, set to "Unknown".
+        field = dicom_get(file, "SoftwareVersions", "")
+        if not field:
+            ohif_info(
+                namespace,
+                f"fixing SoftwareVersions with field {field!r}",
+                level=3)
+            dicom_set(file, "SoftwareVersions", "LO", "Unknown")
 
-    if isinstance(err, httpx.HTTPStatusError):
-        status_code = err.response.status_code
-        args[2] = status_code
-        args[3] = http.HTTPStatus(status_code).phrase
-
-    return tuple(args) #type: ignore[return-value]
-
-
-def rest_username(namespace: OHIFNamespace) -> str:
-    """Get the REST username."""
-
-    with rest_client(namespace) as rest:
-        r = rest.get("/xapi/users/username")
-        r.raise_for_status()
-
-    return r.text
+        field = dicom_get(file, "StudyID", None)
+        if field in ("", None):
+            ohif_info(
+                namespace,
+                f"fixing StudyID with field {field!r}",
+                level=3)
+            dicom_set(file, "StudyID", "SH", "Unknown")
 
 
 @click.group()
@@ -449,7 +693,7 @@ def ohif(
     # Validate that credentials are valid by first
     # making an attempt to get their username.
     if host:
-        rest_username(ctx.obj)
+        REST.get_username(ctx.obj)
 
     return 0
 
@@ -462,6 +706,7 @@ def roi():
 @roi.command
 @pass_clinamespace
 @click.argument("project")
+@click.argument("subject")
 @click.argument("session")
 @click.option(
     "--overwrite/--create",
@@ -479,6 +724,7 @@ def roi():
 def store(
     namespace: OHIFNamespace,
     project: str,
+    subject: str,
     session: str,
     *,
     files: typing.Sequence[pathlib.Path],
@@ -495,9 +741,10 @@ def store(
         ohif_panic("no files were provided")
 
     namespace.files = files
-    rest_ohif_roi_store(
+    RESTOHIF.roi_store(
         namespace,
         project,
+        subject,
         session,
         label=label,
         roi_type=roi_type,
