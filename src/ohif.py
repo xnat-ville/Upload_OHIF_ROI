@@ -72,6 +72,27 @@ class XNATExperiment:
 
 
 @dataclasses.dataclass
+class XNATScan:
+    frames:                 int
+    ID:                     str
+    image_session_ID:       str
+    modality:               str
+    parameters_fov_x:       int
+    parameters_fov_y:       int
+    parameters_orientation: str
+    parameters_voxelRes_x:  float
+    parameters_voxelRes_y:  float
+    parameters_voxelRes_z:  float
+    project:                str
+    quality:                str
+    series_description:     str
+    type:                   str
+    UID:                    str
+    xnat_imagescandata_id:  int
+    xnat_imageScanData_id:  int
+
+
+@dataclasses.dataclass
 class XNATSubject:
     ID:      str
     label:   str
@@ -259,14 +280,17 @@ def ohif_panic(
 def ohif_strict_quitter(
         code: int | None = None,
         *,
-        strict: bool | None = None) -> None | typing.NoReturn:
+        strict: str | None = None) -> None | typing.NoReturn:
     """
     Exits the program using the built-in `quit`
     call if called with `strict` as `True`.
     """
 
-    if (strict := strict if strict is not None else True):
+    strict = "quitter" if strict is None else strict
+    if strict == "quitter":
         quit(code)
+    if strict == "raise":
+        raise
     return None
 
 
@@ -285,7 +309,7 @@ def rest_auth(namespace: OHIFNamespace) -> httpx.Auth:
 def rest_client(
         namespace: OHIFNamespace,
         *,
-        strict: typing.Optional[bool] = None,
+        strict: typing.Optional[str] = None,
         verify: typing.Optional[bool] = None):
     """
     Create a REST client to make calls against the
@@ -375,13 +399,13 @@ class REST:
     def _object_getter(
         cls,
         namespace: OHIFNamespace,
-        uri: str) -> dict[str, str]:
+        uri: str) -> dict[str, typing.Any]:
         """
         Get the raw contents of an object from an
         XNAT.
         """
 
-        with rest_client(namespace, strict=True) as rest:
+        with rest_client(namespace, strict="raise") as rest:
             r = rest.get(uri, params=dict(format="json"))
             r.raise_for_status()
 
@@ -392,13 +416,17 @@ class REST:
             return r.json()["items"][0]["data_fields"]
 
     @classmethod
-    def _object_putter(cls, namespace: OHIFNamespace, uri: str) -> str:
+    def _object_putter(
+            cls,
+            namespace: OHIFNamespace,
+            uri: str,
+            **params) -> str:
         """
         Raw PUT request for some XNAT endpoint.
         """
 
-        with rest_client(namespace, strict=True) as rest:
-            r = rest.put(uri)
+        with rest_client(namespace, strict="raise") as rest:
+            r = rest.put(uri, params=params)
             r.raise_for_status()
 
             ohif_info(
@@ -406,6 +434,30 @@ class REST:
                 f"(PUT) {r.url.path} ({r.status_code})",
                 level=4)
             return r.text
+
+    @classmethod
+    def aquire_scan(
+        cls,
+        namespace: OHIFNamespace,
+        project: str,
+        subject: str,
+        session: str,
+        scan: str,
+        xsi_type: str) -> XNATScan:
+        """
+        Attempt to get an existing scan. If none
+        exists on the remote XNAT, create the
+        instance and return the created scan.
+        """
+
+        common_args = namespace, project, subject, session, scan
+        getter = functools.partial(cls.get_scan, *common_args)
+        putter = functools.partial(cls.put_scan, *common_args, xsi_type)
+        try:
+            return getter()
+        except httpx.HTTPStatusError:
+            putter()
+            return getter()
 
     @classmethod
     def aquire_session(
@@ -420,8 +472,9 @@ class REST:
         instance and return the created session.
         """
 
-        getter = functools.partial(cls.get_session, namespace, project)
-        putter = functools.partial(cls.put_session, namespace, project)
+        common_args = namespace, project
+        getter = functools.partial(cls.get_session, *common_args)
+        putter = functools.partial(cls.put_session, *common_args)
 
         try:
             return getter(session)
@@ -458,11 +511,33 @@ class REST:
         session.
         """
 
-        with rest_client(namespace, strict=True) as rest:
+        with rest_client(namespace, strict="quitter") as rest:
             r = rest.get("/xapi/users/username")
             r.raise_for_status()
 
         return r.text
+
+    @classmethod
+    def get_scan(
+        cls,
+        namespace: OHIFNamespace,
+        project: str,
+        subject: str,
+        session: str,
+        scan: str) -> XNATScan:
+        """Get scan data from an XNAT."""
+
+        data = cls._object_getter(
+            namespace,
+            f"/data/projects/{project}/subjects/{subject}/experiments/{session}"
+            f"/scans/{scan}")
+
+        for key in data.copy().keys():
+            # Must replace all '/' chars to make
+            # data dataclass digestable.
+            data[key.replace("/", "_")] = data.pop(key)
+
+        return XNATScan(**data)
 
     @classmethod
     def get_session(
@@ -492,6 +567,23 @@ class REST:
             namespace,
             f"/data/projects/{project}/subjects/{subject}")
         return XNATSubject(**data)
+
+    @classmethod
+    def put_scan(
+            cls,
+            namespace: OHIFNamespace,
+            project: str,
+            subject: str,
+            session: str,
+            scan: str,
+            xsi_type: str):
+        """Create a new scan on a remote XNAT."""
+
+        return cls._object_putter(
+            namespace,
+            f"/data/projects/{project}/subjects/{subject}/experiments/{session}"
+            f"/scans/{scan}",
+            xsiType=xsi_type)
 
     @classmethod
     def put_session(
@@ -607,7 +699,7 @@ class RESTOHIF:
             rest  = es.enter_context(rest_client(namespace, strict=False))
             twd = pathlib.Path(es.enter_context(tempfile.TemporaryDirectory()))
 
-            ohif_info(namespace, f"attempting to push {file!s}", level=4)
+            ohif_info(namespace, f"attempting to push {file!s}", level=2)
             # Create a copy of the target file to
             # validate and push to XNAT.
             shutil.copyfile(str(file), str(twd.joinpath("image.dcm")))
@@ -624,7 +716,7 @@ class RESTOHIF:
             ohif_info(
                 namespace,
                 f"(PUT) {r.url.path} ({r.status_code})",
-                level=2)
+                level=4)
 
     @classmethod
     def roi_store_subject(
@@ -639,7 +731,33 @@ class RESTOHIF:
         data from file.
         """
 
-        assert False, "store subject not yet implemented"
+        # SeriesNumber == scan id
+        # Attempt to create the scan if it does
+        # not already exist.
+        scan = REST.aquire_scan(
+            namespace,
+            project,
+            subject.label,
+            session.label,
+            dicom_get(file, "SeriesNumber"),
+            dicom_get(file, "Modality").lower() + ":ScanData")
+
+        uri = (
+            f"/data/experiments/{session.ID}/scans/{scan.ID}/resources/"
+            f"DICOM/files/{file.name}")
+
+        with contextlib.ExitStack() as es:
+            rest = es.enter_context(rest_client(namespace))
+            fd   = file.open("rb")
+
+            ohif_info(namespace, f"attempting to upload {file!s}", level=2)
+            r = rest.post(uri, params=dict(inbody="true"), data=fd)
+            r.raise_for_status()
+
+            ohif_info(
+                namespace,
+                f"(POST) {r.url.path} ({r.status_code})",
+                level=4)
 
     @classmethod
     def roi_validate_segment(
