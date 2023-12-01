@@ -19,6 +19,9 @@ import magic
 import pydicom
 import pydicom.tag
 
+T = typing.TypeVar("T")
+P = typing.ParamSpec("P")
+
 
 class ROIType(enum.StrEnum):
     """OHIF ROI supported DICOM types."""
@@ -171,7 +174,6 @@ def dicom_find_files(
     return tuple(files)
 
 
-T = typing.TypeVar("T")
 @typing.overload
 def dicom_get(
     path: pathlib.Path,
@@ -390,10 +392,55 @@ def rest_host(namespace: OHIFNamespace) -> str:
     return  uri
 
 
+GetterFunc = typing.Callable[typing.Concatenate[OHIFNamespace, P], T]
+PutterFunc = typing.Callable[typing.Concatenate[OHIFNamespace, P], typing.Any]
+
+
 class REST:
     """
     Common RESTful operations against an XNAT.
     """
+
+    @classmethod
+    def _object_acquirer(
+            cls,
+            getter: GetterFunc[P, T],
+            putter: PutterFunc[P],
+            *,
+            common_args: tuple | None = None,
+            common_kwds: dict | None = None,
+            getter_args: tuple | None = None,
+            getter_kwds: dict | None = None,
+            putter_args: tuple | None = None,
+            putter_kwds: dict | None = None) -> T:
+        """
+        Attempt to get a particular object. If the
+        object does not exist, try to create it
+        and return the newly created object.
+        """
+
+        # Eliminate None values for vararg varkwd
+        # parameters.
+        common_args = common_args or ()
+        common_kwds = common_kwds or {}
+        getter_args = getter_args or ()
+        getter_kwds = getter_kwds or {}
+        putter_args = putter_args or ()
+        putter_kwds = putter_kwds or {}
+
+        args = common_args + getter_args
+        kwds = common_kwds | getter_kwds
+        p_getter  = functools.partial(getter, *args, **kwds)
+
+        args = common_args + putter_args
+        kwds = common_kwds | putter_kwds
+        p_putter  = functools.partial(putter, *args, **kwds)
+
+        try:
+            return p_getter()
+        except httpx.HTTPStatusError:
+            p_putter()
+            return p_getter()
 
     @classmethod
     def _object_getter(
@@ -436,7 +483,7 @@ class REST:
             return r.text
 
     @classmethod
-    def aquire_scan(
+    def acquire_scan(
         cls,
         namespace: OHIFNamespace,
         project: str,
@@ -450,17 +497,15 @@ class REST:
         instance and return the created scan.
         """
 
-        common_args = namespace, project, subject, session, scan
-        getter = functools.partial(cls.get_scan, *common_args)
-        putter = functools.partial(cls.put_scan, *common_args, xsi_type)
-        try:
-            return getter()
-        except httpx.HTTPStatusError:
-            putter()
-            return getter()
+        return cls._object_acquirer(
+            cls.get_scan, #type: ignore[arg-type]
+            cls.put_scan, #type: ignore[arg-type]
+            common_args=(namespace, project, subject, session, scan),
+            putter_args=(xsi_type,)
+        )
 
     @classmethod
-    def aquire_session(
+    def acquire_session(
             cls,
             namespace: OHIFNamespace,
             project: str,
@@ -472,37 +517,29 @@ class REST:
         instance and return the created session.
         """
 
-        common_args = namespace, project
-        getter = functools.partial(cls.get_session, *common_args)
-        putter = functools.partial(cls.put_session, *common_args)
-
-        try:
-            return getter(session)
-        except httpx.HTTPStatusError:
-            putter(subject, session)
-            return getter(session)
+        return cls._object_acquirer(
+            cls.get_session, #type: ignore[arg-type]
+            cls.put_session, #type: ignore[arg-type]
+            common_args=(namespace, project),
+            getter_args=(session,),
+            putter_args=(subject, session))
 
     @classmethod
-    def aquire_subject(
+    def acquire_subject(
             cls,
             namespace: OHIFNamespace,
             project: str,
-            subject: str):
+            subject: str) -> XNATSubject:
         """
         Attempt to get an existing subject. If
         none exists on the remote XNAT, create the
         instance and return the created subject.
         """
 
-        common_args = namespace, project, subject
-        getter = functools.partial(cls.get_subject, *common_args)
-        putter = functools.partial(cls.put_subject, *common_args)
-
-        try:
-            return getter()
-        except httpx.HTTPStatusError:
-            putter()
-            return getter()
+        return cls._object_acquirer(
+            cls.get_subject,
+            cls.put_subject,
+            common_args=(namespace, project, subject))
 
     @classmethod
     def get_username(cls, namespace: OHIFNamespace) -> str:
@@ -635,8 +672,9 @@ class RESTOHIF:
         session data, in a remote XNAT.
         """
 
-        xsession = REST.aquire_session(namespace, project, subject, session)
-        xsubject = REST.aquire_subject(namespace, project, subject)
+        common_args = namespace, project, subject
+        xsession = REST.acquire_session(*common_args, session)
+        xsubject = REST.acquire_subject(*common_args)
 
         ohif_info(
             namespace,
@@ -734,7 +772,7 @@ class RESTOHIF:
         # SeriesNumber == scan id
         # Attempt to create the scan if it does
         # not already exist.
-        scan = REST.aquire_scan(
+        scan = REST.acquire_scan(
             namespace,
             project,
             subject.label,
