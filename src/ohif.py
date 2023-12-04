@@ -645,11 +645,13 @@ class REST:
             raise ValueError(message)
 
         params = dict(xsiType=xsi_type)
-        getter = functools.partial(dicom_get, file)
+        def add_dicom_header(param, name):
+            params[f"xnat:imageScanData/{param}"] = dicom_get(file, name)
+
         if file:
-            params["xsiType/series_description"] = getter("SeriesDescription") #type: ignore
-            params["xsiType/modality"] = getter("Modality") #type: ignore
-            params["xsiType/"] = getter("SeriesDescription") #type: ignore
+            add_dicom_header("series_description", "SeriesDescription")
+            add_dicom_header("modality", "Modality")
+            add_dicom_header("type", "SeriesDescription")
 
         ret = cls._object_putter(
             namespace,
