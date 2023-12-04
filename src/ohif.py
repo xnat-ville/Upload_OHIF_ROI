@@ -1,4 +1,4 @@
-__version__ = (0, 1, 7)
+__version__ = (0, 1, 8)
 
 import contextlib
 import dataclasses
@@ -58,41 +58,43 @@ class ROIType(enum.StrEnum):
 
 @dataclasses.dataclass
 class XNATExperiment:
-    date:                 str
-    dcmPatientBirthDate:  str
-    dcmPatientId:         str
-    dcmPatientName:       str
     ID:                   str
     id:                   str
     label:                str
-    prearchivePath:       str
     project:              str
     scanner_manufacturer: str
     scanner_model:        str
-    session_type:         str
     subject_ID:           str
-    UID:                  str
+
+    date:                 str = ""
+    dcmPatientBirthDate:  str = ""
+    dcmPatientId:         str = ""
+    dcmPatientName:       str = ""
+    prearchivePath:       str = ""
+    session_type:         str = ""
+    UID:                  str = ""
 
 
 @dataclasses.dataclass
 class XNATScan:
-    frames:                 int
     ID:                     str
     image_session_ID:       str
-    modality:               str
-    parameters_fov_x:       int
-    parameters_fov_y:       int
-    parameters_orientation: str
-    parameters_voxelRes_x:  float
-    parameters_voxelRes_y:  float
-    parameters_voxelRes_z:  float
     project:                str
-    quality:                str
-    series_description:     str
-    type:                   str
-    UID:                    str
     xnat_imagescandata_id:  int
     xnat_imageScanData_id:  int
+
+    frames:                 int = 0
+    modality:               str = ""
+    parameters_fov_x:       int = 0
+    parameters_fov_y:       int = 0
+    parameters_orientation: str = ""
+    parameters_voxelRes_x:  float = 0.0
+    parameters_voxelRes_y:  float = 0.0
+    parameters_voxelRes_z:  float = 0.0 
+    quality:                str = ""
+    series_description:     str = ""
+    type:                   str = ""
+    UID:                    str = ""
 
 
 @dataclasses.dataclass
@@ -200,6 +202,12 @@ def dicom_get(path, key, default=...):
     return pydicom.dcmread(path).get(key, default)
 
 
+def dicom_get_xsi(path: pathlib.Path, subtype: str) -> str:
+    """Get the `xsiType` from a DICOM file."""
+
+    return f"xnat:{dicom_get(path, 'Modality').lower()}{subtype}"
+
+
 def dicom_isdicom_file(path: pathlib.Path) -> bool:
     """
     Given path is a file, exists, and is a DICOM
@@ -254,7 +262,7 @@ def ohif_error(*values: str, sep: str | None = None) -> None:
 
 def ohif_info(
         namespace: OHIFNamespace,
-        *values: str,
+        *values: object,
         sep: str | None = None,
         level: int | None = None) -> None:
     """
@@ -265,7 +273,9 @@ def ohif_info(
 
     if namespace.verbose < (level or 0):
         return None
-    message = f"{click.style('info', fg='green')}: " + (sep or " ").join(values)
+    message = (
+        f"{click.style('info', fg='green')}: "
+        + (sep or " ").join(map(str, values)))
     click.echo(message)
 
 
@@ -289,11 +299,15 @@ def ohif_strict_quitter(
     """
 
     strict = "quitter" if strict is None else strict
-    if strict == "quitter":
+
+    if strict == "ignore":
+        return None
+    elif strict == "quitter":
         quit(code)
-    if strict == "raise":
+    elif strict == "raise":
         raise
-    return None
+    else:
+        raise ValueError(f"Unexpected strict mode type {strict!r}")
 
 
 def rest_auth(namespace: OHIFNamespace) -> httpx.Auth:
@@ -489,8 +503,10 @@ class REST:
         project: str,
         subject: str,
         session: str,
-        scan: str,
-        xsi_type: str) -> XNATScan:
+        scan: typing.Optional[str] = None,
+        *,
+        file: typing.Optional[pathlib.Path] = None,
+        xsi_type: typing.Optional[str] = None) -> XNATScan:
         """
         Attempt to get an existing scan. If none
         exists on the remote XNAT, create the
@@ -501,7 +517,7 @@ class REST:
             cls.get_scan, #type: ignore[arg-type]
             cls.put_scan, #type: ignore[arg-type]
             common_args=(namespace, project, subject, session, scan),
-            putter_args=(xsi_type,)
+            putter_kwds=dict(xsi_type=xsi_type, file=file)
         )
 
     @classmethod
@@ -510,7 +526,10 @@ class REST:
             namespace: OHIFNamespace,
             project: str,
             subject: str,
-            session: str) -> XNATExperiment:
+            session: str,
+            *,
+            file: typing.Optional[pathlib.Path] = None,
+            xsi_type: typing.Optional[str] = None) -> XNATExperiment:
         """
         Attempt to get an existing session. If
         none exists on the remote XNAT, create the
@@ -522,7 +541,8 @@ class REST:
             cls.put_session, #type: ignore[arg-type]
             common_args=(namespace, project),
             getter_args=(session,),
-            putter_args=(subject, session))
+            putter_args=(subject, session),
+            putter_kwds=dict(xsi_type=xsi_type, file=file))
 
     @classmethod
     def acquire_subject(
@@ -588,8 +608,8 @@ class REST:
                 namespace,
                 f"/data/projects/{project}/experiments/{session}")
 
-        data["scanner_model"]        = data.pop("scanner/model")
-        data["scanner_manufacturer"] = data.pop("scanner/manufacturer")
+        data["scanner_model"]        = data.pop("scanner/model", "")
+        data["scanner_manufacturer"] = data.pop("scanner/manufacturer", "")
         return XNATExperiment(**data)
 
     @classmethod
@@ -613,14 +633,31 @@ class REST:
             subject: str,
             session: str,
             scan: str,
-            xsi_type: str):
+            *,
+            file: typing.Optional[pathlib.Path] = None,
+            xsi_type: typing.Optional[str] = None):
         """Create a new scan on a remote XNAT."""
 
-        return cls._object_putter(
+        if file and not xsi_type:
+            xsi_type = dicom_get_xsi(file, "ScanData")
+        elif not xsi_type:
+            message = "Expected an xsiType or a DICOM file to extract it."
+            raise ValueError(message)
+
+        params = dict(xsiType=xsi_type)
+        getter = functools.partial(dicom_get, file)
+        if file:
+            params["xsiType/series_description"] = getter("SeriesDescription") #type: ignore
+            params["xsiType/modality"] = getter("Modality") #type: ignore
+            params["xsiType/"] = getter("SeriesDescription") #type: ignore
+
+        ret = cls._object_putter(
             namespace,
             f"/data/projects/{project}/subjects/{subject}/experiments/{session}"
             f"/scans/{scan}",
             xsiType=xsi_type)
+
+        return ret
 
     @classmethod
     def put_session(
@@ -628,15 +665,27 @@ class REST:
             namespace: OHIFNamespace,
             project: str,
             subject: str,
-            session: str) -> str:
+            session: str,
+            *,
+            file: typing.Optional[pathlib.Path] = None,
+            xsi_type: typing.Optional[str] = None) -> str:
         """
         Create a new session on a remote XNAT.
         """
 
-        return cls._object_putter(
+        if file and not xsi_type:
+            xsi_type = dicom_get_xsi(file, "SessionData")
+        elif not xsi_type:
+            message = "Expected an xsiType or a DICOM file to extract it."
+            raise ValueError(message)
+
+        ret = cls._object_putter(
             namespace,
-            f"/data/projects/{project}/subjects/{subject}/experiments/{session}"
+            f"/data/projects/{project}/subjects/{subject}/experiments/{session}",
+            xsiType=xsi_type
         )
+
+        return ret
 
     @classmethod
     def put_subject(
@@ -666,6 +715,7 @@ class RESTOHIF:
         *,
         label: typing.Optional[str],
         roi_type: str,
+        xsi_type: str,
         overwrite: bool) -> None:
         """
         Attempt to store segment data, and correlating
@@ -673,7 +723,7 @@ class RESTOHIF:
         """
 
         common_args = namespace, project, subject
-        xsession = REST.acquire_session(*common_args, session)
+        xsession = REST.acquire_session(*common_args, session, xsi_type=xsi_type)
         xsubject = REST.acquire_subject(*common_args)
 
         ohif_info(
@@ -714,11 +764,13 @@ class RESTOHIF:
         """
 
         if not label:
+            file_sd  = dicom_get(file, "SeriesDescription")
+            file_pid = dicom_get(file, "PatientID")
             label = (
-                dicom_get(file, "SeriesDescription")
+                file_sd
                 .replace(" ", "_")
-                .replace(subject.label, session.label)
-        )
+                .replace(file_pid, session.label)
+            )
 
         uri = (
             f"/xapi/roi/projects/{project}"
@@ -734,7 +786,7 @@ class RESTOHIF:
         params["seriesuid"] = dicom_get(file, "SeriesInstanceUID")
 
         with contextlib.ExitStack() as es:
-            rest  = es.enter_context(rest_client(namespace))
+            rest  = es.enter_context(rest_client(namespace, strict="ignore"))
             twd = pathlib.Path(es.enter_context(tempfile.TemporaryDirectory()))
 
             ohif_info(namespace, f"attempting to push {file!s}", level=2)
@@ -751,10 +803,12 @@ class RESTOHIF:
                 headers=headers,
                 params=params)
             r.raise_for_status()
-            ohif_info(
-                namespace,
-                f"(PUT) {r.url.path} ({r.status_code})",
-                level=4)
+
+            if r.status_code in range(200, 400):
+                ohif_info(
+                    namespace,
+                    f"(PUT) {r.url.path} ({r.status_code})",
+                    level=4)
 
     @classmethod
     def roi_store_subject(
@@ -778,24 +832,26 @@ class RESTOHIF:
             subject.label,
             session.label,
             dicom_get(file, "SeriesNumber"),
-            dicom_get(file, "Modality").lower() + ":ScanData")
+            file=file,
+            xsi_type=dicom_get_xsi(file, "ScanData"))
 
         uri = (
             f"/data/experiments/{session.ID}/scans/{scan.ID}/resources/"
             f"DICOM/files/{file.name}")
 
         with contextlib.ExitStack() as es:
-            rest = es.enter_context(rest_client(namespace))
+            rest = es.enter_context(rest_client(namespace, strict="ignore"))
             fd   = file.open("rb")
 
             ohif_info(namespace, f"attempting to upload {file!s}", level=2)
             r = rest.post(uri, params=dict(inbody="true"), data=fd)
             r.raise_for_status()
 
-            ohif_info(
-                namespace,
-                f"(POST) {r.url.path} ({r.status_code})",
-                level=4)
+            if r.status_code in range(200, 400):
+                ohif_info(
+                    namespace,
+                    f"(POST) {r.url.path} ({r.status_code})",
+                    level=4)
 
     @classmethod
     def roi_validate_segment(
@@ -896,6 +952,20 @@ def store(
     if not files:
         ohif_panic("no files were provided")
 
+    # Identify the xsiType from found files.
+    xsi_type = set()
+    for file in files:
+        t = dicom_get_xsi(file, "SessionData")
+        if any([n in t for n in ("aim", "seg", "rtstruct")]):
+            continue
+        xsi_type.add(t)
+
+    if len(xsi_type) > 1:
+        ohif_panic(f"too many xsiTypes detected ({len(xsi_type)})")
+    if len(xsi_type) < 1:
+        ohif_panic(f"could not determine xsiType")
+    xsi_type = tuple(xsi_type)[0] #type: ignore[assignment]
+
     namespace.files = files
     RESTOHIF.roi_store(
         namespace,
@@ -904,6 +974,7 @@ def store(
         session,
         label=label,
         roi_type=roi_type,
+        xsi_type=xsi_type, #type: ignore[arg-type]
         overwrite=overwrite)
 
 
