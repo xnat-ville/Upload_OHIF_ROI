@@ -71,6 +71,7 @@ class XNATExperiment:
     dcmPatientBirthDate:  str = ""
     dcmPatientId:         str = ""
     dcmPatientName:       str = ""
+    modality:             str = ""
     prearchivePath:       str = ""
     session_type:         str = ""
     UID:                  str = ""
@@ -684,11 +685,24 @@ class REST:
             message = "Expected an xsiType or a DICOM file to extract it."
             raise ValueError(message)
 
+        params = dict(xsiType=xsi_type)
+        def add_param(param, value):
+            params[param] = value
+
+        def add_image_data(param, name):
+            add_param(f"xnat:imageSessionData/{param}", dicom_get(file, name))
+
+        def add_sxn_data(param, name):
+            add_param(f"xnat:experimentdata/{param}", dicom_get(file, name))
+
+        if file:
+            add_sxn_data("date", "StudyDate")
+            add_image_data("modality", "Modality")
+
         ret = cls._object_putter(
             namespace,
             f"/data/projects/{project}/subjects/{subject}/experiments/{session}",
-            xsiType=xsi_type
-        )
+            **params)
 
         return ret
 
@@ -720,15 +734,30 @@ class RESTOHIF:
         *,
         label: typing.Optional[str],
         roi_type: str,
-        xsi_type: str,
         overwrite: bool) -> None:
         """
         Attempt to store segment data, and correlating
         session data, in a remote XNAT.
         """
 
+        # Identify the xsiType from found files.
+        xsi_types = set()
+        sxn_file = None
+        for file in namespace.files:
+            t = dicom_get_xsi(file, "SessionData")
+            if any([n in t for n in ("aim", "seg", "rtstruct")]):
+                continue
+            sxn_file = file
+            xsi_types.add(t)
+
+        if len(xsi_types) > 1:
+            ohif_panic(f"too many xsiTypes detected ({len(xsi_types)})")
+        if len(xsi_types) < 1:
+            ohif_panic(f"could not determine xsiType")
+
         common_args = namespace, project, subject
-        xsession = REST.acquire_session(*common_args, session, xsi_type=xsi_type)
+        common_kwds = dict(xsi_type=tuple(xsi_types)[0], file=sxn_file)
+        xsession = REST.acquire_session(*common_args, session, **common_kwds) #type: ignore[arg-type]
         xsubject = REST.acquire_subject(*common_args)
 
         ohif_info(
@@ -786,7 +815,6 @@ class RESTOHIF:
 
         params = dict()
         params["overwrite"] = str(overwrite or False).lower()
-        params["seriesuid"] = ""
         params["type"]      = roi_type
         params["seriesuid"] = dicom_get(file, "SeriesInstanceUID")
 
@@ -885,7 +913,9 @@ class RESTOHIF:
                 namespace,
                 f"fixing StudyID with field {field!r}",
                 level=3)
-            dicom_set(file, "StudyID", "SH", "Unknown")
+            dicom_set(file, "StudyID", "SH", "0")
+
+        print(dicom_get(file, "StudyInstanceUID"))
 
 @click.group()
 @click.pass_context
@@ -956,20 +986,6 @@ def store(
     if not files:
         ohif_panic("no files were provided")
 
-    # Identify the xsiType from found files.
-    xsi_type = set()
-    for file in files:
-        t = dicom_get_xsi(file, "SessionData")
-        if any([n in t for n in ("aim", "seg", "rtstruct")]):
-            continue
-        xsi_type.add(t)
-
-    if len(xsi_type) > 1:
-        ohif_panic(f"too many xsiTypes detected ({len(xsi_type)})")
-    if len(xsi_type) < 1:
-        ohif_panic(f"could not determine xsiType")
-    xsi_type = tuple(xsi_type)[0] #type: ignore[assignment]
-
     namespace.files = files
     RESTOHIF.roi_store(
         namespace,
@@ -978,7 +994,6 @@ def store(
         session,
         label=label,
         roi_type=roi_type,
-        xsi_type=xsi_type, #type: ignore[arg-type]
         overwrite=overwrite)
 
 
