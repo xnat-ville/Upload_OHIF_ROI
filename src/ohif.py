@@ -18,6 +18,7 @@ import httpx
 import magic
 import pydicom
 import pydicom.tag
+import pydicom.uid
 
 T = typing.TypeVar("T")
 P = typing.ParamSpec("P")
@@ -90,8 +91,9 @@ class XNATScan:
     parameters_orientation: str = ""
     parameters_voxelRes_x:  float = 0.0
     parameters_voxelRes_y:  float = 0.0
-    parameters_voxelRes_z:  float = 0.0 
+    parameters_voxelRes_z:  float = 0.0
     quality:                str = ""
+    series_class:           str = ""
     series_description:     str = ""
     type:                   str = ""
     UID:                    str = ""
@@ -437,17 +439,13 @@ class REST:
         # parameters.
         common_args = common_args or ()
         common_kwds = common_kwds or {}
-        getter_args = getter_args or ()
-        getter_kwds = getter_kwds or {}
-        putter_args = putter_args or ()
-        putter_kwds = putter_kwds or {}
 
-        args = common_args + getter_args
-        kwds = common_kwds | getter_kwds
+        args = common_args + (getter_args or ())
+        kwds = common_kwds | (getter_kwds or {})
         p_getter  = functools.partial(getter, *args, **kwds)
 
-        args = common_args + putter_args
-        kwds = common_kwds | putter_kwds
+        args = common_args + (putter_args or ())
+        kwds = common_kwds | (putter_kwds or {})
         p_putter  = functools.partial(putter, *args, **kwds)
 
         try:
@@ -648,16 +646,21 @@ class REST:
         def add_dicom_header(param, name):
             params[f"xnat:imageScanData/{param}"] = dicom_get(file, name)
 
+        def add_series_class():
+            value = pydicom.uid.UID_dictionary[dicom_get(file, "SOPClassUID")]
+            params["xnat:imageScanData/series_class"] = value[0]
+
         if file:
             add_dicom_header("series_description", "SeriesDescription")
             add_dicom_header("modality", "Modality")
             add_dicom_header("type", "SeriesDescription")
+            add_series_class()
 
         ret = cls._object_putter(
             namespace,
             f"/data/projects/{project}/subjects/{subject}/experiments/{session}"
             f"/scans/{scan}",
-            xsiType=xsi_type)
+            **params)
 
         return ret
 
@@ -883,7 +886,6 @@ class RESTOHIF:
                 f"fixing StudyID with field {field!r}",
                 level=3)
             dicom_set(file, "StudyID", "SH", "Unknown")
-
 
 @click.group()
 @click.pass_context
