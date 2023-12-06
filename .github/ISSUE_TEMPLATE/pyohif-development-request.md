@@ -1,5 +1,5 @@
 ---
-name: PyOHIF Development Template
+name: PyOHIF Development Request
 about: For when there is a request for a feature
 title: "[PyOHIF Dev]"
 labels: enhancement
