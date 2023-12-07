@@ -3,6 +3,7 @@
 *.tar*
 *.tz*
 *.gzip*
+*.manifest
 
 # Environment files and dirs.
 .venv/
@@ -12,6 +13,7 @@
 logs/
 data/
 example/
+tmp/
 
 # Build artifacts.
 build/
