@@ -183,8 +183,9 @@ def dicom_find_files(
     # same StudyInstanceUID value.
     study_instance_uids = {dicom_get(f, "StudyInstanceUID") for f in files}
     if len(study_instance_uids) > 1:
-        ohif_error("Files found have more than one StudyInstanceUID")
-        ohif_panic(f"Found in files {study_instance_uids}")
+        raise ValueError(
+            "Files found have more than one StudyInstanceUID. "
+            f"Found in files {study_instance_uids}")
 
     return tuple(files)
 
@@ -289,11 +290,40 @@ def file_iszip(file: pathlib.Path):
         "zip archive data" in magic.from_file(file).lower())
 
 
-def ohif_error(*values: str, sep: str | None = None) -> None:
+def ohif_echo(
+        namespace: OHIFNamespace,
+        name: str,
+        *values: object,
+        sep: str | None = None,
+        level: int | None = None,
+        err: bool | None = None) -> None:
+    """
+    Print a message, and a new line, to
+    `stderr` or stdout`. If the verbosity level is
+    less than the level passed, do not write to
+    output.
+    """
+
+    if namespace.verbose < (level or 0):
+        return None
+    click.echo(
+        ohif_mformat(
+            name,
+            *values,
+            sep=sep,
+            level=level),
+        err=err or False)
+
+
+def ohif_error(
+        namespace: OHIFNamespace,
+        *values: object,
+        sep: str | None = None,
+        level: int | None = None) -> None:
     """Write a message to `stderr`."""
 
-    message = f"{click.style('error', fg='red')}: " + (sep or " ").join(values)
-    click.echo(message, err=True)
+    name = click.style("error", fg="red")
+    ohif_echo(namespace, name, *values, sep=sep, level=level, err=True)
 
 
 def ohif_info(
@@ -307,21 +337,38 @@ def ohif_info(
     to `level`.
     """
 
-    if namespace.verbose < (level or 0):
-        return None
-    message = (
-        f"{click.style('info', fg='green')}: "
-        + (sep or " ").join(map(str, values)))
-    click.echo(message)
+    name = click.style("info", fg="green")
+    ohif_echo(namespace, name, *values, sep=sep, level=level)
+
+
+def ohif_mformat(
+        name: str,
+        *values: object,
+        sep: str | None,
+        level: int | None) -> str:
+    """
+    Render a message to be used by PyOHIF logging.
+    messages are constructed as the below where
+    `level` is optional and is omitted if not set.
+    ```
+    <name>[(<level>)]: sep.join(<values>)
+    ```
+    """
+
+    message = (sep or " ").join(map(str, values))
+    if level and level > 0:
+        return f"{name}({level}): " + message
+    return f"{name}: " + message
 
 
 def ohif_panic(
-        *values: str,
+        namespace: OHIFNamespace,
+        *values: object,
         sep: str | None = None,
         code: int | None = None) -> typing.NoReturn:
     """Write message to `stderr` and quit."""
 
-    ohif_error(*values, sep=sep)
+    ohif_error(namespace, *values, sep=sep)
     quit(code or 1)
 
 
@@ -379,7 +426,9 @@ def rest_client(
         yield client
     except httpx.HTTPStatusError as error:
         method, path, code, phrase = rest_extract_error(error)
-        ohif_error(f"({method}) {path} failed: <{code} {phrase!r}>")
+        ohif_error(
+            namespace,
+            f"({method}) {path} failed: <{code} {phrase!r}>")
         # Extract error message from HTML.
         if error.response.text and "<html>" in error.response.text:
             html = bs4.BeautifulSoup(error.response.text, features="html.parser")
@@ -387,11 +436,13 @@ def rest_client(
         else:
             data = error.response.text
 
-        ohif_error(data)
+        ohif_error(namespace, data)
         ohif_strict_quitter(1, strict=strict)
     except httpx.RequestError as error:
         method, path, *_ = rest_extract_error(error)
-        ohif_error(f"({method}) {path} failed: {error}")
+        ohif_error(
+            namespace,
+            f"({method}) {path} failed: {error}")
         ohif_strict_quitter(1, strict=strict)
 
 
@@ -721,6 +772,9 @@ class REST:
             (("SI",), "triggerPipelines", trigger_pipelines, bool2string)
         )
 
+        if handler and handler not in ("SI", "DICOM-zip", "gradual-DICOM"):
+            raise TypeError(f"Unsupported import handler {handler!r}")
+
         # These values are to always be set.
         params["import-handler"] = handler or "SI"
         params["inbody"]         = "true"
@@ -875,9 +929,11 @@ class RESTOHIF:
             xsi_types.add(t)
 
         if len(xsi_types) > 1:
-            ohif_panic(f"too many xsiTypes detected ({len(xsi_types)})")
+            ohif_panic(
+                namespace,
+                f"too many xsiTypes detected ({len(xsi_types)})")
         if len(xsi_types) < 1:
-            ohif_panic(f"could not determine xsiType")
+            ohif_panic(namespace, f"could not determine xsiType")
 
         args = namespace, project, subject
         kwds = dict(xsi_type=tuple(xsi_types)[0])
@@ -1112,11 +1168,11 @@ def store(
     """Store an ROI collection."""
 
     if not namespace.host:
-        ohif_panic("no hostname was provided")
+        ohif_panic(namespace, "no hostname was provided")
 
     files = dicom_find_files(*files)
     if not files:
-        ohif_panic("no files were provided")
+        ohif_panic(namespace, "no files were provided")
 
     namespace.files = files
     RESTOHIF.roi_store(
