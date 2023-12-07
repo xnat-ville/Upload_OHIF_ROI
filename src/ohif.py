@@ -383,7 +383,7 @@ def rest_client(
         # Extract error message from HTML.
         if error.response.text and "<html>" in error.response.text:
             html = bs4.BeautifulSoup(error.response.text, features="html.parser")
-            data = html.body.find("h3").text
+            data = html.body.find("h3").text #type: ignore[union-attr]
         else:
             data = error.response.text
 
