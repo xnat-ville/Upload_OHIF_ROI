@@ -1,14 +1,19 @@
 __version__ = (0, 1, 9)
 
+import concurrent.futures as concfutures
 import contextlib
 import dataclasses
+import datetime
 import enum
 import functools
 import http
+import math
 import netrc
 import os
 import pathlib
+import random
 import shutil
+import time
 import tempfile
 import typing
 import urllib.parse
@@ -100,6 +105,29 @@ class XNATExperiment:
     prearchivePath:       str = ""
     session_type:         str = ""
     UID:                  str = ""
+
+
+@dataclasses.dataclass
+class XNATPreArchive:
+    prevent_anon:        bool
+    subject:             str
+    PROTOCOL:            str
+    project:             str
+    url:                 str
+    autoarchive:         str
+    VISIT:               str
+    prevent_auto_commit: bool
+    uploaded:            datetime.datetime
+    name:                str # Experiment label.
+    SOURCE:              str
+    scan_time:           datetime.datetime
+    folderName:          str
+    tag:                 str # STUID
+    TIMEZONE:            str
+    scan_date:           datetime.datetime
+    lastmod:             datetime.datetime
+    timestamp:           str
+    status:              str
 
 
 @dataclasses.dataclass
@@ -499,6 +527,36 @@ def rest_host(namespace: OHIFNamespace) -> str:
     return  uri
 
 
+def wait_sleep_shaker(
+        start: float,
+        max_sleep: float | None = None,
+        growth: float | None = None,
+        max_shake: float | None = None) -> typing.Generator[float, None, None]:
+    """
+    Generate the amount of time to sleep in a
+    sleep function 'shaking' the value randomly.
+    """
+
+    sleep_shaker = lambda: (math.sin(random.random() * 60) * 100)
+    growth    = growth or 1.0
+    max_shake = max_shake or 1.0
+
+    while True:
+        yield start
+        # Skip calculation if at max.
+        if start == max_sleep:
+            continue
+        # Calculate next sleep with random 'shake'
+        # of the final result.
+        shake = sleep_shaker()
+        shake = (shake % max_shake) * ((shake // shake) if shake else 1.00)
+        start = (start ** growth) + shake
+        # Ensure sleep time does not exceed passed
+        # maximum.
+        if max_sleep:
+            start = min(max_sleep, start)
+
+
 GetterFunc = typing.Callable[typing.Concatenate[OHIFNamespace, P], T]
 PutterFunc = typing.Callable[typing.Concatenate[OHIFNamespace, P], typing.Any]
 
@@ -651,17 +709,57 @@ class REST:
             common_args=(namespace, project, subject))
 
     @classmethod
-    def get_username(cls, namespace: OHIFNamespace) -> str:
+    def get_prearchive(
+            cls,
+            namespace: OHIFNamespace,
+            project: str,
+            subject_id: str | None = None,
+            session_label: str | None = None) -> tuple[XNATPreArchive, ...]:
         """
-        Get the username associated with the REST
-        session.
+        Get mappings of sessions sitting in the
+        prearchive of a specified project. If
+        `subject_id` or `session_label` or both
+        params are passed, filter out any records
+        that do not match.
         """
 
-        with rest_client(namespace, strict="quitter") as rest:
-            r = rest.get("/xapi/users/username")
+        data: typing.Iterable[dict[str, str | bool | datetime.datetime]]
+        retn: list[XNATPreArchive]
+
+        uri = f"/data/prearchive/projects/{project}"
+        with rest_client(namespace, strict="raise") as rest:
+            r = rest.get(uri, params=dict(format="json"))
             r.raise_for_status()
 
-        return r.text
+            ohif_info(
+                namespace,
+                f"(GET) {r.url.path} ({r.status_code})",
+                level=4)
+
+            data = r.json()["ResultSet"]["Result"]
+
+        if subject_id:
+            data = filter(lambda o: o["subject"] == subject_id, data)
+        if session_label:
+            data = filter(lambda o: o["name"] == session_label, data)
+
+        retn = list()
+        booler = lambda o: bool(o.capitalize() if isinstance(o, str) else o)
+        dater  = lambda o: (
+            datetime.datetime.fromisoformat(o)
+            if o else datetime.datetime(9999, 12, 31))
+
+        for item in data:
+            item["prevent_anon"]        = booler(item["prevent_anon"])
+            item["prevent_auto_commit"] = booler(item["prevent_auto_commit"])
+            item["uploaded"]            = dater(item["uploaded"])
+            item["scan_time"]           = dater(item["scan_time"])
+            item["scan_date"]           = dater(item["scan_date"])
+            item["lastmod"]             = dater(item["lastmod"])
+
+            retn.append(XNATPreArchive(**item)) #type: ignore[arg-type]
+
+        return tuple(retn)
 
     @classmethod
     def get_scan(
@@ -713,6 +811,19 @@ class REST:
             namespace,
             f"/data/projects/{project}/subjects/{subject}")
         return XNATSubject(**data)
+
+    @classmethod
+    def get_username(cls, namespace: OHIFNamespace) -> str:
+        """
+        Get the username associated with the REST
+        session.
+        """
+
+        with rest_client(namespace, strict="quitter") as rest:
+            r = rest.get("/xapi/users/username")
+            r.raise_for_status()
+
+        return r.text
 
     @classmethod
     def import_sessioni(
@@ -963,35 +1074,42 @@ class RESTOHIF:
                     ohif_info(
                         namespace,
                         f"adding {file!s} to {store_path.name}",
-                        level=2)
+                        level=3)
                     sfd.write(file.as_posix() + "\n")
                 # Add regular DICOM to zip file to
                 # be imported later.
-                elif not dicom_isroi(file):
+                elif not dicom_isroi(file) and overwrite:
                     ohif_info(
                         namespace,
                         f"adding {file!s} to {zippr_path.name}",
-                        level=2)
+                        level=3)
                     ifd.write(file, file.name)
                 # Ignore all other files.
                 else:
                     ohif_info(
                         namespace,
                         f"{file!s} not a {roi_type} file",
-                        level=2)
+                        level=3)
                     ohif_info(namespace, "skipping", level=3)
 
-            try:
-                REST.import_sessioni(
-                    namespace,
-                    project,
-                    xsubject.ID,
-                    xsession.label,
-                    zippr_path,
-                    handler="DICOM-zip",
-                    rename=True)
-            except httpx.HTTPStatusError:
-                pass # Cathing an error handled internally.
+            if overwrite:
+                try:
+                    REST.import_sessioni(
+                        namespace,
+                        project,
+                        xsubject.ID,
+                        xsession.label,
+                        zippr_path,
+                        handler="DICOM-zip",
+                        rename=True)
+                except httpx.HTTPStatusError:
+                    pass # Cathing an error handled internally.
+                else:
+                    cls.roi_wait_import(
+                        namespace,
+                        project,
+                        xsubject.ID,
+                        xsession.label)
 
             # Move cursor to top of file.
             sfd.seek(0, 0)
@@ -1013,7 +1131,7 @@ class RESTOHIF:
             cls,
             namespace: OHIFNamespace,
             project: str,
-            subject: XNATSubject,
+            _: XNATSubject,
             session: XNATExperiment,
             file: pathlib.Path,
             *,
@@ -1099,10 +1217,97 @@ class RESTOHIF:
                 level=3)
             dicom_set(file, "StudyID", "SH", "0")
 
-        ohif_info(namespace, "filepath:", file.as_posix(), level=4)
-        for item in pydicom.dcmread(file):
-            ohif_info(namespace, item, level=4)
-        ohif_info(namespace, "end DICOM inspection", level=4)
+    @classmethod
+    def roi_wait_import(
+            cls,
+            namespace: OHIFNamespace,
+            project: str,
+            subject_id: str,
+            session_label: str) -> None:
+        """
+        Block until imported DICOM either fails
+        (e.g. timeout or conflict occurs) or
+        is uploaded.
+        """
+
+        # Wait values. `wait_latch` holds a single
+        # value, like a lock, to tell individual
+        # workers when to quit.
+        # `wait_max` dictates how long until
+        # timeout.
+        # `wait_iv` is the interval, during wait
+        # to output wait time to stdout.
+        wait_latch = dict(acquired=True)
+        wait_max   = datetime.timedelta(minutes=10.0)
+        wait_iv    = 15.0
+
+        waiter_args = namespace, wait_latch, wait_max, wait_iv
+        worker_args = namespace, wait_latch, project, subject_id, session_label
+
+        ohif_info(namespace, "awaiting DICOM import", level=2)
+        with concfutures.ThreadPoolExecutor(2) as exc:
+            exc.submit(cls.roi_wait_import_worker, *worker_args)
+            exc.submit(cls.roi_wait_import_waiter, *waiter_args)
+
+    @classmethod
+    def roi_wait_import_waiter(
+            cls,
+            namespace: OHIFNamespace,
+            wait_latch: dict,
+            wait_max: datetime.timedelta,
+            wait_interval: float) -> None:
+        """
+        Logs wait time for `roi_wait_import`.
+        """
+
+        wait_current = lambda: datetime.datetime.now()
+        wait_start   = wait_current()
+
+        while wait_latch["acquired"]:
+            wait_total = (wait_current() - wait_start)
+
+            if wait_total >= wait_max:
+                wait_latch["acquired"] = False
+                break
+
+            ts = wait_total.total_seconds()
+            if (ts % wait_interval) == 0.0 and ts > 1.0:
+                ohif_info(
+                    namespace,
+                    f"timeout in {wait_max - wait_total!s}",
+                    level=3)
+
+    @classmethod
+    def roi_wait_import_worker(
+            cls,
+            namespace: OHIFNamespace,
+            wait_latch: dict,
+            project: str,
+            subject_id: str,
+            session_label: str) -> None:
+        """Worker thread for `roi_wait_import`."""
+
+        query_prearchive = lambda: REST.get_prearchive(
+            namespace,
+            project,
+            subject_id=subject_id,
+            session_label=session_label)
+
+        shaker = wait_sleep_shaker(1.3, 90.0, growth=1.7, max_shake=15.0)
+        while wait_latch["acquired"]:
+            records = query_prearchive()
+            # Possibly done with import.
+            if not records:
+                wait_latch["acquired"] = False
+                break
+
+            # All records left are stuck
+            # in prearchive.
+            if not any((r.status == "RECEIVING" for r in records)):
+                wait_latch["acquired"] = False
+                break
+
+            time.sleep(next(shaker))
 
 
 @click.group()
