@@ -1055,7 +1055,6 @@ class RESTOHIF:
             namespace,
             f"found {len(namespace.files)} DICOM files.",
             level=1)
-        ohif_info(namespace, f"attempting to upload {roi_type} data.", level=1)
 
         # Prepare zip file for upload of regular
         # DICOM files.
@@ -1093,6 +1092,10 @@ class RESTOHIF:
                     ohif_info(namespace, "skipping", level=3)
 
             if overwrite:
+                ohif_info(
+                    namespace,
+                    f"attempting to import regular DICOM.",
+                    level=1)
                 try:
                     REST.import_sessioni(
                         namespace,
@@ -1111,6 +1114,10 @@ class RESTOHIF:
                         xsubject.ID,
                         xsession.label)
 
+            ohif_info(
+                namespace,
+                f"attempting to upload {roi_type} data.",
+                level=1)
             # Move cursor to top of file.
             sfd.seek(0, 0)
             for filename in sfd.readlines():
