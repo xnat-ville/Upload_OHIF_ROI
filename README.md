@@ -26,7 +26,7 @@ DLL files.
 $ python3 -m pip install python-magic-bin
 ```
 
-For MacOS installation will require `libmagic` or `file` depending on
+For MacOS, installation will require `libmagic` or `file` depending on
 your package manager
 ```zsh
 # For homebrew
