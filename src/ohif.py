@@ -550,7 +550,7 @@ def wait_sleep_shaker(
         # of the final result.
         shake = sleep_shaker()
         shake = (shake % max_shake) * ((shake // shake) if shake else 1.00)
-        start = (start ** growth) + shake
+        start = max(0.0, (start ** growth) + shake)
         # Ensure sleep time does not exceed passed
         # maximum.
         if max_sleep:
@@ -1300,7 +1300,7 @@ class RESTOHIF:
             subject_id=subject_id,
             session_label=session_label)
 
-        shaker = wait_sleep_shaker(1.3, 90.0, growth=1.7, max_shake=15.0)
+        shaker = wait_sleep_shaker(2.1, 90.0, growth=1.08, max_shake=15.0)
         while wait_latch["acquired"]:
             records = query_prearchive()
             # Possibly done with import.
