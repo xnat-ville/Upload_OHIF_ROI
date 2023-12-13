@@ -261,7 +261,10 @@ def dicom_isdicom_file(path: pathlib.Path) -> bool:
     if path.is_dir():
         return False
 
-    return magic.from_file(str(path)) == "DICOM medical imaging data"
+    try:
+        return magic.from_file(str(path)) == "DICOM medical imaging data"
+    except TypeError:
+        return ".dcm" in path.as_posix()
 
 
 def dicom_isroi_type(path: pathlib.Path, roi_type: str | ROIType) -> bool:
@@ -312,10 +315,13 @@ def file_iszip(file: pathlib.Path):
     archive.
     """
 
-    return (
-        file.exists() and
-        not file.is_dir() and
-        "zip archive data" in magic.from_file(file).lower())
+    if not file.exists() or file.is_dir():
+        return False
+
+    try:
+        return "zip archive data" in magic.from_file(file).lower()
+    except TypeError:
+        return  ".zip" in file.as_posix()
 
 
 def ohif_echo(
