@@ -1,7 +1,8 @@
-__version__ = (0, 1, 11)
+__version__ = (0, 1, 12)
 
 import concurrent.futures as concfutures
 import contextlib
+import ctypes
 import dataclasses
 import datetime
 import enum
@@ -320,8 +321,8 @@ def file_iszip(file: pathlib.Path):
 
     try:
         return "zip archive data" in magic.from_file(file).lower()
-    except TypeError:
-        return  ".zip" in file.as_posix()
+    except (TypeError, ctypes.ArgumentError):
+        return  ".zip" in file.name
 
 
 def ohif_echo(
